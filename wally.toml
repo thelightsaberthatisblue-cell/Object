@@ -1,0 +1,9 @@
+[package]
+name = "thelightsaberthatisblue-cell/object"
+description = "A framework for Object-Oriented Programming in Luau"
+version = "0.1.0"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+authors = ["thelightsaberthatisblue-cell"]
+
+[dependencies]
