@@ -1,7 +1,10 @@
 [package]
 name = "thelightsaberthatisblue-cell/object"
-description = "A framework for Object-Oriented Programming in Luau"
-version = "0.1.0"
+description = "A reactive OOP entity framework for Roblox Luau. Supports inheritance, mixins, signals, HyperSync reactive state, generation trees, adornee pooling, and full instance lifecycle management."
+version = "1.0.0"
+documentation = "https://github.com/thelightsaberthatisblue-cell/Object/blob/main/README.md"
+repository = "https://github.com/thelightsaberthatisblue-cell/Object"
+license = "MIT"
 registry = "https://github.com/UpliftGames/wally-index"
 realm = "shared"
 authors = ["thelightsaberthatisblue-cell"]
