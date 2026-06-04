@@ -30,6 +30,8 @@ end
 -- REGISTRY
 -- all classes live here, keyed by className
 -- accessed via Object.GetClass() publicly
+-- subclasses are stored as "ParentName.SubName"
+-- preventing name collisions across different parent classes
 --////////////////////////////////////////////////////////////
 local Objects = {}
 
@@ -58,6 +60,8 @@ local function buildClass(className: string, parentClass: any?): any
 	-- Signals         = { [name] = true } signal names, instances get own Signal objects
 	-- HyperSyncs      = { [signalName] = wrappedConditionFunc }
 	--   condition is pre-wrapped once at registration — no pcall in hot path
+	-- Subs            = { [subName] = subClassName } registered subclasses
+	--   instances get a proxy table per sub for gen-tracked spawning
 	-- ActiveInstances = weak-keyed table { [instance] = true }
 	--   weak keys mean GC can collect instances even if Destroy was never called
 	--   prevents memory leaks from forgotten references
@@ -74,6 +78,7 @@ local function buildClass(className: string, parentClass: any?): any
 	ClassTable.HyperMethods    = {}
 	ClassTable.Signals         = {}
 	ClassTable.HyperSyncs      = {}
+	ClassTable.Subs            = {} -- { [subName] = fullSubClassName }
 	ClassTable.ClassName       = className
 	ClassTable.Parent          = parentClass
 	ClassTable._adornee        = nil
@@ -84,8 +89,6 @@ local function buildClass(className: string, parentClass: any?): any
 	ClassTable._sealed         = false
 
 	-- WEAK ACTIVE INSTANCES
-	-- weak keys let GC collect instances even if Destroy was never called
-	-- prevents slow memory creep on long servers
 	ClassTable.ActiveInstances = setmetatable({}, { __mode = "k" })
 
 	-- INHERITANCE SETUP
@@ -164,8 +167,6 @@ local function buildClass(className: string, parentClass: any?): any
 
 	--////////////////////////////////////////////////////////////
 	-- NewSuperFunc
-	-- receives (self, super, ...) — super is immediate parent's version
-	-- bound once at instance creation, zero instance mutation during call
 	--////////////////////////////////////////////////////////////
 	ClassTable.NewSuperFunc = function(name: string, func: (...any) -> ())
 		sealGuard("NewSuperFunc")
@@ -183,9 +184,6 @@ local function buildClass(className: string, parentClass: any?): any
 
 	--////////////////////////////////////////////////////////////
 	-- NewHyperFunc
-	-- receives (self, hyper, ...) — hyper is a specific ancestor's version
-	-- skips everything between this class and the target class
-	-- bound once at instance creation, zero instance mutation during call
 	--////////////////////////////////////////////////////////////
 	ClassTable.NewHyperFunc = function(name: string, targetClassName: string, func: (...any) -> ())
 		sealGuard("NewHyperFunc")
@@ -215,12 +213,6 @@ local function buildClass(className: string, parentClass: any?): any
 
 	--////////////////////////////////////////////////////////////
 	-- HyperSync
-	-- defines an auto-fired signal triggered by a condition
-	-- condition is pre-wrapped ONCE at registration time
-	-- no pcall in the hot path — just a direct function call per write
-	-- fires object.HyperEvents[signalName] when condition flips true
-	-- resets when condition becomes false so it can fire again next flip
-	-- auto-registers the signal so no separate NewSignal needed
 	--////////////////////////////////////////////////////////////
 	ClassTable.HyperSync = function(signalName: string, conditionFunc: (any) -> boolean)
 		sealGuard("HyperSync")
@@ -232,10 +224,6 @@ local function buildClass(className: string, parentClass: any?): any
 			warn("HyperSync [" .. className .. "]: condition must be a function")
 			return
 		end
-
-		-- PRE-WRAP condition once here at registration
-		-- wraps in pcall so errors in condition don't crash the write path
-		-- but the wrap happens ONCE, not on every write
 		local wrappedCondition = function(instance)
 			local ok, result = pcall(conditionFunc, instance)
 			if not ok then
@@ -244,9 +232,8 @@ local function buildClass(className: string, parentClass: any?): any
 			end
 			return result
 		end
-
 		ClassTable.HyperSyncs[signalName] = wrappedCondition
-		ClassTable.Signals[signalName]    = true -- auto-register signal
+		ClassTable.Signals[signalName]    = true
 	end
 
 	--////////////////////////////////////////////////////////////
@@ -325,6 +312,42 @@ local function buildClass(className: string, parentClass: any?): any
 	end
 
 	--////////////////////////////////////////////////////////////
+	-- Sub
+	-- creates a namespaced subclass owned by this class
+	-- stored in registry as "ParentName.SubName"
+	-- prevents name collisions — two classes can both have a "Shrapnel" sub
+	-- instances of this class get instance.SubName proxy table
+	-- instance.SubName.New() spawns with full gen tracking:
+	--   GenParent = the spawning instance
+	--   Gen       = spawning instance's Gen + 1
+	-- subs can have their own subs — nesting works indefinitely
+	--
+	-- usage:
+	--   local GrenadeShrapnel = Grenade.Sub("Shrapnel")
+	--   GrenadeShrapnel.NewVar("Damage", 25)
+	--
+	--   -- inside Grenade's Main or methods:
+	--   self.Shrapnel.New() -- gen tracked, parented to this grenade instance
+	--////////////////////////////////////////////////////////////
+	ClassTable.Sub = function(subName: string)
+		sealGuard("Sub")
+		if typeof(subName) ~= "string" then
+			error("Sub [" .. className .. "]: subName must be a string")
+		end
+
+		-- namespace the sub under the parent class name
+		local fullSubName = className .. "." .. subName
+
+		-- build the sub as a normal class — full API, full features
+		local SubClass = buildClass(fullSubName, nil)
+
+		-- register sub name on this class so instances know about it
+		ClassTable.Subs[subName] = fullSubName
+
+		return SubClass
+	end
+
+	--////////////////////////////////////////////////////////////
 	-- GetAll
 	--////////////////////////////////////////////////////////////
 	ClassTable.GetAll = function(): { any }
@@ -356,7 +379,7 @@ local function buildClass(className: string, parentClass: any?): any
 
 	--////////////////////////////////////////////////////////////
 	-- INTERNAL SPAWN
-	-- used by both Class.New() and instance.New() (generations)
+	-- used by Class.New(), instance.New() (generations), instance.SubName.New() (subs)
 	--////////////////////////////////////////////////////////////
 	local function spawnInstance(adornee: any?, genParent: any?, genNumber: number?)
 
@@ -395,9 +418,7 @@ local function buildClass(className: string, parentClass: any?): any
 		object.Adornee         = resolvedAdornee
 		object.IsDestroyed     = false
 
-		--////////////////////////////////////////////////////////////
 		-- GENERATIONS
-		--////////////////////////////////////////////////////////////
 		object.Gen         = genNumber or 1
 		object.GenParent   = genParent or nil
 		object.GenChildren = {}
@@ -433,6 +454,26 @@ local function buildClass(className: string, parentClass: any?): any
 		end
 
 		--////////////////////////////////////////////////////////////
+		-- SUB PROXIES
+		-- for each registered sub, attach a proxy table to the instance
+		-- instance.SubName.New(adornee?) spawns a sub instance with:
+		--   GenParent = this instance
+		--   Gen       = this instance's Gen + 1
+		-- this is cross-class gen tracking — different class, same lineage graph
+		--////////////////////////////////////////////////////////////
+		for subName, fullSubName in pairs(ClassTable.Subs) do
+			local SubClass = Objects[fullSubName]
+			if SubClass then
+				local subSpawn = SubClass._spawnInstance
+				object[subName] = {
+					New = function(subAdornee: any?)
+						return subSpawn(subAdornee, object, object.Gen + 1)
+					end
+				}
+			end
+		end
+
+		--////////////////////////////////////////////////////////////
 		-- SUPER PROXY
 		--////////////////////////////////////////////////////////////
 		local parentMethods = getmetatable(ClassTable.Methods) and getmetatable(ClassTable.Methods).__index
@@ -441,7 +482,6 @@ local function buildClass(className: string, parentClass: any?): any
 		for name, method in pairs(ClassTable.Methods) do
 
 			if ClassTable.HyperMethods[name] then
-				-- HYPER STYLE: bind specific ancestor's method
 				local targetName  = ClassTable.HyperMethods[name]
 				local targetClass = Objects[targetName]
 				if not targetClass then
@@ -459,7 +499,6 @@ local function buildClass(className: string, parentClass: any?): any
 				end
 
 			elseif ClassTable.SuperMethods[name] then
-				-- SUPER ARG STYLE: bind immediate parent's method
 				local parentMethod = parentMethods and parentMethods[name]
 				if parentMethod then
 					local boundSuper = function()
@@ -473,7 +512,6 @@ local function buildClass(className: string, parentClass: any?): any
 				end
 
 			else
-				-- INJECTION STYLE or no parent version
 				local parentMethod = parentMethods and parentMethods[name]
 				if parentMethod then
 					local boundSuper = function()
@@ -494,12 +532,7 @@ local function buildClass(className: string, parentClass: any?): any
 
 		setmetatable(SuperProxy, { __index = ClassTable.Methods })
 
-		--////////////////////////////////////////////////////////////
 		-- METATABLE
-		-- __index    = SuperProxy
-		-- __newindex = immutable guard + HyperSync evaluation
-		-- HyperSync conditions are pre-wrapped — no pcall in hot path
-		--////////////////////////////////////////////////////////////
 		setmetatable(object, {
 			__index    = SuperProxy,
 			__newindex = function(t, key, value)
@@ -509,8 +542,6 @@ local function buildClass(className: string, parentClass: any?): any
 
 				rawset(t, key, value)
 
-				-- HYPERSYNC CHECK
-				-- conditions are pre-wrapped closures, no pcall overhead here
 				for signalName, wrappedCondition in pairs(ClassTable.HyperSyncs) do
 					local result = wrappedCondition(t)
 					if result and not hyperSyncTripped[signalName] then
@@ -525,12 +556,10 @@ local function buildClass(className: string, parentClass: any?): any
 			end
 		})
 
-		-- INSTANCE TRACKING (weak — GC safe)
+		-- INSTANCE TRACKING
 		ClassTable.ActiveInstances[object] = true
 
-		--////////////////////////////////////////////////////////////
-		-- instance.New() — GENERATIONS
-		--////////////////////////////////////////////////////////////
+		-- instance.New() — same class gen spawn
 		object.New = function(newAdornee: any?)
 			return spawnInstance(newAdornee, object, object.Gen + 1)
 		end
@@ -543,7 +572,6 @@ local function buildClass(className: string, parentClass: any?): any
 
 			ClassTable.ActiveInstances[object] = nil
 
-			-- remove from parent's GenChildren
 			if object.GenParent and object.GenParent.GenChildren then
 				for i, child in ipairs(object.GenParent.GenChildren) do
 					if child == object then
@@ -553,7 +581,6 @@ local function buildClass(className: string, parentClass: any?): any
 				end
 			end
 
-			-- developer cleanup first
 			if ClassTable._cleanup then
 				local ok, err = pcall(ClassTable._cleanup, object)
 				if not ok then
@@ -561,13 +588,11 @@ local function buildClass(className: string, parentClass: any?): any
 				end
 			end
 
-			-- disconnect adornee binding
 			if adorneeConnection then
 				adorneeConnection:Disconnect()
 				adorneeConnection = nil
 			end
 
-			-- destroy cloned adornee if framework owns it
 			if ownsAdornee then
 				if typeof(resolvedAdornee) == "Instance" then
 					resolvedAdornee:Destroy()
@@ -576,7 +601,6 @@ local function buildClass(className: string, parentClass: any?): any
 				end
 			end
 
-			-- disconnect all signals (also cancels Wait() coroutines)
 			if object.Events then
 				for _, signal in pairs(object.Events) do
 					signal:DisconnectAll()
@@ -588,7 +612,6 @@ local function buildClass(className: string, parentClass: any?): any
 				end
 			end
 
-			-- nuke instance
 			for key in pairs(object) do
 				object[key] = nil
 			end
@@ -597,12 +620,10 @@ local function buildClass(className: string, parentClass: any?): any
 
 		object.Destroy = destroy
 
-		-- ADORNEE BINDING
 		if typeof(resolvedAdornee) == "Instance" then
 			adorneeConnection = resolvedAdornee.Destroying:Connect(destroy)
 		end
 
-		-- AUTO RUN MAIN
 		local ok, err = pcall(ClassTable.Main, object)
 		if not ok then
 			warn("Object [" .. className .. "] Main error: " .. tostring(err))
@@ -610,6 +631,9 @@ local function buildClass(className: string, parentClass: any?): any
 
 		return object
 	end
+
+	-- expose spawnInstance so Sub proxies can call it cross-class
+	ClassTable._spawnInstance = spawnInstance
 
 	ClassTable.New = function(adornee: any?)
 		return spawnInstance(adornee, nil, 1)

@@ -28,7 +28,7 @@ local Object = require(ReplicatedStorage.Packages.Object)
 |---|---|
 | **Class** | A blueprint. Defines variables, methods, signals, and lifecycle hooks. |
 | **Instance** | A live object created from a class. Has its own independent state. |
-| **Adornee** | The Roblox object (Part, Model, GUI, etc.) the instance is bound to. |
+| **Adornee** | The object the instance is bound to. Not limited to Roblox Instances. |
 | **Main** | Auto-runs when an instance is created. |
 | **SetCleanup** | Auto-runs before an instance is destroyed. The reverse of Main. |
 
@@ -176,8 +176,9 @@ end)
 
 ## Adornee
 
-The adornee is the Roblox object the instance is bound to.
-When the adornee is destroyed, the instance is automatically destroyed too.
+The adornee is the object an instance is bound to — not strictly limited to Roblox Instances. It can be a Part, Model, ScreenGui, or any runtime value.
+
+When a Roblox Instance adornee is destroyed, the instance is automatically destroyed too. Non-Instance adornees have no auto-destroy binding — the developer manages their lifecycle manually or via `SetCleanup`.
 
 ### Manual adornee (developer passes it)
 ```lua
@@ -215,6 +216,8 @@ end
 ## Signals
 
 Signals are per-instance event objects. Firing one instance's signal does not affect any other instance.
+
+**Events are developer-driven. HyperEvents are engine-driven.** See [HyperSync](#hypersync-reactive-state) for the reactive counterpart.
 
 ### `Class.NewSignal(name)`
 Defines a signal at class level. Each instance gets its own independent Signal object.
@@ -258,7 +261,7 @@ end)
 
 ## HyperSync (Reactive State)
 
-HyperSync automatically fires a signal when a condition becomes true after any value write.
+HyperSync automatically fires a signal when a condition becomes true after any instance property mutation.
 The condition is only checked after writes, not on a loop.
 It fires once per flip — resets when the condition becomes false again.
 
@@ -292,6 +295,8 @@ end)
 
 Instances can spawn new instances of their own class via `self.New()`.
 The framework automatically tracks generation data on every instance.
+
+Generations are not limited to spawning enemies — they represent any parent-child runtime lineage. Use them for splitting projectiles, branching dialogue trees, chained ability effects, or anything where instances spawn related instances.
 
 | Property | What it is |
 |---|---|
